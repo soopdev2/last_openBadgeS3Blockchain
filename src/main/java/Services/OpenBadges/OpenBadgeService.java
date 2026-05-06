@@ -86,7 +86,8 @@ public class OpenBadgeService {
             Map<String, Object> mittente,
             Map<String, Object> destinatario,
             Map<String, Object> criteri,
-            String base64File
+            String base64File,
+            String estensione
     ) {
 
         // (1) Infotrack
@@ -98,22 +99,31 @@ public class OpenBadgeService {
 
         try {
 
-            // (2) FALLBACK DA FILE
-            boolean missingData = badge == null || mittente == null || destinatario == null || criteri == null;
+            Utils utils = new Utils();
 
-            if (missingData) {
+            Map<String, Object> parsedData = null;
+
+            boolean needFileFallback
+                    = isEmptyMap(badge)
+                    || isEmptyMap(mittente)
+                    || isEmptyMap(destinatario)
+                    || isEmptyMap(criteri);
+
+            if (needFileFallback) {
+
                 if (base64File == null || base64File.isBlank()) {
                     throw new IllegalArgumentException("Dati mancanti e file base64 non fornito");
                 }
 
-                Utils utils = new Utils();
-                Map<String, Object> parsedData = utils.estraiDatiDaFile(base64File);
-
-                badge = badge != null ? badge : (Map<String, Object>) parsedData.get("badge");
-                mittente = mittente != null ? mittente : (Map<String, Object>) parsedData.get("mittente");
-                destinatario = destinatario != null ? destinatario : (Map<String, Object>) parsedData.get("destinatario");
-                criteri = criteri != null ? criteri : (Map<String, Object>) parsedData.get("criteri");
+                parsedData = utils.estraiDatiDaFile(
+                        base64File,
+                        (estensione != null && !estensione.isBlank()) ? estensione : ".pdf"
+                );
             }
+            badge = mergeIfMissing(badge, parsedData != null ? parsedData.get("badge") : null);
+            mittente = mergeIfMissing(mittente, parsedData != null ? parsedData.get("mittente") : null);
+            destinatario = mergeIfMissing(destinatario, parsedData != null ? parsedData.get("destinatario") : null);
+            criteri = mergeIfMissing(criteri, parsedData != null ? parsedData.get("criteri") : null);
 
             // (3) VALIDAZIONE BASE
             if (badge == null || mittente == null || destinatario == null || criteri == null) {
@@ -141,9 +151,26 @@ public class OpenBadgeService {
             }
 
             // (5) DATI BADGE
-            String badgeName = (String) badge.getOrDefault("nome", "Badge");
-            String badgeDescription = (String) badge.getOrDefault("descrizione", "");
-            String logoUrl = (String) badge.getOrDefault("logo", "");
+            String badgeName = (String) badge.get("badge_name");
+            String badgeDescription = (String) badge.get("badge_description");
+            String logoUrl = (String) badge.getOrDefault("logo", "https://openbagetest.s3.eu-central-1.amazonaws.com/logo/logoOpenBadge.png");
+
+            if (badgeName == null || badgeName.isBlank() || badgeName.equalsIgnoreCase("badge")) {
+                badgeName = null;
+            }
+
+            if (badgeDescription == null || badgeDescription.isBlank()
+                    || badgeDescription.toLowerCase().contains("descrizione non disponibile")) {
+                badgeDescription = null;
+            }
+
+            if (badgeName == null) {
+                badgeName = "Certificazione Professionale";
+            }
+
+            if (badgeDescription == null) {
+                badgeDescription = "Certificazione che attesta competenze professionali acquisite e validate nel contesto formativo o lavorativo.";
+            }
 
             // (6) DATI UTENTI
             String mittenteNome = (String) mittente.get("nome");
@@ -318,8 +345,8 @@ public class OpenBadgeService {
             response.put("assertion_hash", hashHex);
             response.put("tx_hash", txHash);
 
-//            response.put("base64", base64File);
-//            response.put("base64_qr", base64WithQr);
+            response.put("base64", base64File);
+            response.put("base64_qr", base64WithQr);
             infoTrack.setDescrizione("SUCCESSO - openbadge generato correttamente");
             JpaUtil.salvaInfoTrack(infoTrack);
 
@@ -630,4 +657,57 @@ public class OpenBadgeService {
         return errorResponse;
     }
 
+    private Map<String, Object> mergeIfMissing(Map<String, Object> original, Object fallback) {
+
+        if (!(fallback instanceof Map)) {
+            return original;
+        }
+
+        Map<String, Object> fb = (Map<String, Object>) fallback;
+
+        if (fb == null || fb.isEmpty()) {
+            return original;
+        }
+
+        if (original == null || original.isEmpty()) {
+            return fb;
+        }
+
+        Map<String, Object> result = new HashMap<>(fb);
+
+        result.putAll(original);
+
+        return result;
+    }
+
+    private boolean isEmptyMap(Map<String, Object> map) {
+
+        if (map == null || map.isEmpty()) {
+            return true;
+        }
+
+        return map.values().stream().allMatch(v -> isEmptyValue(v));
+    }
+
+    private boolean isEmptyValue(Object v) {
+
+        if (v == null) {
+            return true;
+        }
+
+        if (v instanceof String) {
+            String s = ((String) v).trim();
+            return s.isEmpty() || s.equalsIgnoreCase("null");
+        }
+
+        if (v instanceof Map) {
+            return ((Map<?, ?>) v).isEmpty();
+        }
+
+        if (v instanceof List) {
+            return ((List<?>) v).isEmpty();
+        }
+
+        return false;
+    }
 }

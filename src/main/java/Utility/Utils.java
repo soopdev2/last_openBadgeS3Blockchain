@@ -4,11 +4,9 @@
  */
 package Utility;
 
-import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
-import java.awt.image.BufferedImage;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.security.MessageDigest;
@@ -18,7 +16,6 @@ import java.text.Normalizer;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Base64;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.ResourceBundle;
@@ -29,7 +26,6 @@ import org.apache.pdfbox.rendering.PDFRenderer;
 
 import com.itextpdf.kernel.pdf.PdfReader;
 import com.itextpdf.kernel.pdf.PdfWriter;
-import java.io.InputStream;
 import java.util.logging.Logger;
 
 import com.itextpdf.barcodes.BarcodeQRCode;
@@ -43,9 +39,12 @@ import com.itextpdf.layout.element.Image;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
-import java.io.FileInputStream;
 import static java.lang.Math.toRadians;
+import java.util.LinkedHashMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import static org.apache.commons.lang3.exception.ExceptionUtils.getStackTrace;
+import org.apache.pdfbox.text.PDFTextStripper;
 
 /**
  *
@@ -180,7 +179,6 @@ public class Utils {
             return null;
         }
 
-        // Normalize unicode
         String s = Normalizer.normalize(input, Normalizer.Form.NFKC);
 
         s = s.replaceAll("[\\p{Cntrl}]", "");
@@ -194,54 +192,58 @@ public class Utils {
         return s;
     }
 
-    public Map<String, Object> estraiDatiDaFile(String base64File) throws Exception {
-
+    public Map<String, Object> estraiDatiDaFile(String base64File, String estensione) throws Exception {
         File file = null;
 
         try {
-
             String base64Data = base64File;
             String extension = ".tmp";
 
             if (base64File.contains(",")) {
-                String header = base64File.substring(0, base64File.indexOf(","));
-                base64Data = base64File.substring(base64File.indexOf(",") + 1);
+                String[] parts = base64File.split(",");
+                String header = parts[0].toLowerCase();
+                base64Data = parts[1];
 
                 if (header.contains("pdf")) {
                     extension = ".pdf";
                 } else if (header.contains("png")) {
                     extension = ".png";
-                } else if (header.contains("jpeg") || header.contains("jpg")) {
+                } else if (header.contains("jp")) {
                     extension = ".jpg";
                 }
             }
-            
-            // (1) BASE64 → FILE TEMP
-            byte[] fileBytes = Base64.getDecoder().decode(base64Data);
 
+            if (extension.equals(".tmp") && estensione != null && !estensione.isBlank()) {
+                extension = estensione.startsWith(".") ? estensione : "." + estensione;
+            }
+
+            byte[] fileBytes = Base64.getDecoder().decode(base64Data);
             file = File.createTempFile("upload_", extension);
             Files.write(file.toPath(), fileBytes);
 
-            String fileName = file.getName().toLowerCase();
-
-            // (2) OCR
-            ITesseract tesseract = new Tesseract();
-            tesseract.setDatapath("C:/tesseract");
-            tesseract.setLanguage("ita");
-
             StringBuilder textBuilder = new StringBuilder();
 
-            boolean isPdf = fileName.endsWith(".pdf");
+            ITesseract tesseract = new Tesseract();
+            String tesseract_path = config.getString("tesseract_path");
+            tesseract.setDatapath(tesseract_path);
+            tesseract.setLanguage("ita");
 
-            if (isPdf) {
+            if (extension.equalsIgnoreCase(".pdf")) {
                 try (PDDocument document = PDDocument.load(file)) {
-                    PDFRenderer renderer = new PDFRenderer(document);
+                    PDFTextStripper stripper = new PDFTextStripper();
+                    String pdfText = stripper.getText(document);
 
-                    int maxPages = Math.min(document.getNumberOfPages(), 2);
+                    if (pdfText != null && pdfText.trim().length() > 50) {
+                        textBuilder.append(pdfText);
+                    } else {
+                        PDFRenderer renderer = new PDFRenderer(document);
+                        int pages = Math.min(document.getNumberOfPages(), 2);
 
-                    for (int i = 0; i < maxPages; i++) {
-                        BufferedImage image = renderer.renderImageWithDPI(i, 200);
-                        textBuilder.append(tesseract.doOCR(image)).append("\n");
+                        for (int i = 0; i < pages; i++) {
+                            textBuilder.append(
+                                    tesseract.doOCR(renderer.renderImageWithDPI(i, 200))
+                            ).append("\n");
+                        }
                     }
                 }
             } else {
@@ -250,102 +252,151 @@ public class Utils {
 
             String cleanText = textBuilder.toString()
                     .replaceAll("\\s+", " ")
+                    .replace("Ã\u00A0", "à")
                     .trim();
 
-            if (cleanText.length() > 1200) {
-                cleanText = cleanText.substring(0, 1200);
+            if (cleanText.length() > 2500) {
+                cleanText = cleanText.substring(0, 2500);
             }
 
-            // (3) PROMPT AI
             String escapedText = cleanText
                     .replace("\"", "\\\"")
                     .replace("\n", " ");
 
             String prompt = """
-Rispondi SOLO con JSON valido.
+    Rispondi SOLO con JSON valido. Estrai i dati con precisione chirurgica.
+                            
+    ### REGOLE PER IL BADGE:
+    1. badge_name: NON scrivere "Badge". Genera un titolo professionale basato sul contenuto (es. "Certificazione Sviluppatore Java", "Esperto Sicurezza sul Lavoro").
+    2. badge_description: Genera una descrizione dettagliata di cosa rappresenta questo documento e quali competenze valida.
+    
+    ### REGOLE PER USER:
+    1. Estrai Nome, Cognome, Data Nascita, CF, Ruolo, Email (1 sola), Azienda, Telefono.
+    2. Luogo Nascita e Indirizzo vanno in 'altri_dati' come chiavi singole.
+    
+    ### REGOLE PER CRITERI (COMPETENZE):
+   CRITERI: Solo requisiti tecnici/competenze. 'valore' mai vuoto.
+   TROVA E RIPORTA I VALORI CHE DESCRIVONO LA COMPETENZA.
+   SE SPECIFICATO INSERISCI ANCHE LA VALUTAZIONE O SEZIONE.
+                            
 
-{
-  "badgeName": "",
-  "badgeDescription": "",
-  "user": {
-    "nome": "",
-    "cognome": "",
-    "email": "",
-    "azienda": ""
-  },
-  "criteriaPoints": [
+    ### SCHEMA JSON:
     {
-      "titolo": "",
-      "valore": ""
+    "badge_name": "",
+     "badge_description": "",
+      "user": { 
+        "nome": "", "cognome": "", "data_nascita": "", "codice_fiscale": "", 
+        "ruolo": "", "email": "", "telefono": "", "azienda": "",
+        "altri_dati": { "luogo_nascita": "", "indirizzo": "" }
+      },
+      "criteriaPoints": [{ "titolo": "", "valore": "" }]
     }
-  ]
-}
+    
+    TESTO DA ANALIZZARE: %s
+    """.formatted(escapedText);
 
-TESTO:
-%s
-""".formatted(escapedText);
+            String cleaned = "INVALID";
 
-            String groqRawResult = GroqUtil.callGroqAPI(prompt);
+            for (int i = 0; i < 2; i++) {
+                String raw = GroqUtil.callGroqAPI(prompt);
+                cleaned = cleanGroqJson(raw);
 
-            String cleaned = cleanGroqJson(groqRawResult);
-
-            if ("INVALID".equals(cleaned)) {
-                throw new Exception("Risposta AI non valida");
-            }
-
-            JsonObject parsed = JsonParser.parseString(cleaned).getAsJsonObject();
-
-            // BADGE
-            Map<String, Object> badge = new HashMap<>();
-            badge.put("nome", parsed.has("badgeName") ? parsed.get("badgeName").getAsString() : "Badge");
-            badge.put("descrizione", parsed.has("badgeDescription") ? parsed.get("badgeDescription").getAsString() : "");
-
-            // MITTENTE (fallback minimale)
-            Map<String, Object> mittente = new HashMap<>();
-            mittente.put("nome", "Sistema automatico");
-            mittente.put("url", "");
-
-            // DESTINATARIO
-            JsonObject user = parsed.has("user") ? parsed.getAsJsonObject("user") : new JsonObject();
-
-            Map<String, Object> destinatario = new HashMap<>();
-            destinatario.put("nome", getSafe(user, "nome"));
-            destinatario.put("cognome", getSafe(user, "cognome"));
-            destinatario.put("email", getSafe(user, "email"));
-
-            // CRITERI
-            List<Map<String, Object>> criteriaList = new ArrayList<>();
-
-            if (parsed.has("criteriaPoints")) {
-                JsonArray arr = parsed.getAsJsonArray("criteriaPoints");
-
-                for (JsonElement el : arr) {
-                    JsonObject obj = el.getAsJsonObject();
-
-                    Map<String, Object> c = new HashMap<>();
-                    c.put("titolo", getSafe(obj, "titolo"));
-                    c.put("valore", getSafe(obj, "valore"));
-
-                    criteriaList.add(c);
+                if (!"INVALID".equals(cleaned)) {
+                    break;
                 }
             }
 
-            Map<String, Object> criteri = new HashMap<>();
-            criteri.put("items", criteriaList);
+            if ("INVALID".equals(cleaned)) {
+                return fallbackResponse(cleanText);
+            }
 
-            Map<String, Object> result = new HashMap<>();
-            result.put("badge", badge);
-            result.put("mittente", mittente);
-            result.put("destinatario", destinatario);
-            result.put("criteri", criteri);
+            JsonObject parsed = JsonParser.parseString(cleaned).getAsJsonObject();
+            JsonObject user = parsed.has("user") ? parsed.getAsJsonObject("user") : new JsonObject();
 
-            return result;
+            Map<String, Object> destinatario = new LinkedHashMap<>();
+            destinatario.put("nome", getSafe(user, "nome"));
+            destinatario.put("cognome", getSafe(user, "cognome"));
+            destinatario.put("email",
+                    getSafe(user, "email").isEmpty() ? extractEmail(cleanText) : getSafe(user, "email")
+            );
+            destinatario.put("telefono", getSafe(user, "telefono"));
+            destinatario.put("dataNascita", getSafe(user, "data_nascita"));
+            destinatario.put("codiceFiscale", getSafe(user, "codice_fiscale"));
+            destinatario.put("ruolo", getSafe(user, "ruolo"));
+            destinatario.put("azienda", getSafe(user, "azienda"));
+
+            if (user.has("altri_dati") && user.get("altri_dati").isJsonObject()) {
+                JsonObject extra = user.getAsJsonObject("altri_dati");
+
+                for (Map.Entry<String, JsonElement> entry : extra.entrySet()) {
+                    String key = entry.getKey().replace("_", " ");
+                    destinatario.put(key, entry.getValue().getAsString());
+                }
+            }
+
+            List<Map<String, String>> criteriaList = new ArrayList<>();
+
+            if (parsed.has("criteriaPoints") && parsed.get("criteriaPoints").isJsonArray()) {
+                parsed.getAsJsonArray("criteriaPoints").forEach(el -> {
+                    if (el.isJsonObject()) {
+                        JsonObject obj = el.getAsJsonObject();
+
+                        Map<String, String> item = new LinkedHashMap<>();
+                        item.put("titolo", String.valueOf(getSafe(obj, "titolo")));
+                        item.put("valore", String.valueOf(getSafe(obj, "valore")));
+
+                        criteriaList.add(item);
+                    }
+                });
+            }
+
+            String extractedName = getSafe(parsed, "badge_name");
+            String extractedDesc = getSafe(parsed, "badge_description");
+
+            if (extractedName == null || extractedName.isBlank()) {
+                extractedName = "Attestato Formazione";
+            }
+
+            if (extractedDesc == null || extractedDesc.isBlank()) {
+                extractedDesc = "Documento che certifica competenze professionali acquisite e validate.";
+            }
+
+            return Map.of(
+                    "badge", Map.of(
+                            "badge_name", extractedName,
+                            "badge_description", extractedDesc,
+                            "logo", "https://openbagetest.s3.eu-central-1.amazonaws.com/logo/logoOpenBadge.png"
+                    ),
+                    "mittente", Map.of("nome", "SmartOOP", "url", "https://smartoop.it/"),
+                    "destinatario", destinatario,
+                    "criteri", Map.of("items", criteriaList)
+            );
 
         } finally {
             if (file != null && file.exists()) {
                 Files.deleteIfExists(file.toPath());
             }
         }
+    }
+
+    private Map<String, Object> fallbackResponse(String text) {
+        return Map.of(
+                "badge", Map.of("nome", "Documento elaborato", "descrizione", text.substring(0, Math.min(200, text.length()))),
+                "mittente", Map.of("nome", "Sistema automatico", "url", ""),
+                "destinatario", Map.of("email", extractEmail(text)),
+                "criteri", Map.of("items", List.of())
+        );
+    }
+
+    private String extractEmail(String text) {
+        Pattern pattern = Pattern.compile("[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}");
+        Matcher matcher = pattern.matcher(text);
+
+        if (matcher.find()) {
+            return matcher.group();
+        }
+
+        return "";
     }
 
     private String getSafe(JsonObject obj, String key) {
@@ -357,32 +408,26 @@ TESTO:
     /**
      * Isola il contenuto JSON eliminando eventuale testo descrittivo dell'IA.
      */
-    private String cleanGroqJson(String response) {
-        if (response == null || response.trim().isEmpty()) {
+    private String cleanGroqJson(String raw) {
+        if (raw == null) {
             return "INVALID";
         }
 
-        try {
-            String cleaned = response.trim()
-                    .replace("```json", "")
-                    .replace("```", "")
-                    .trim();
+        int start = raw.indexOf("{");
+        int end = raw.lastIndexOf("}");
 
-            int start = cleaned.indexOf("{");
-            int end = cleaned.lastIndexOf("}");
+        if (start != -1 && end != -1 && end > start) {
+            String json = raw.substring(start, end + 1);
 
-            if (start != -1 && end != -1 && end > start) {
-                cleaned = cleaned.substring(start, end + 1);
+            try {
+                JsonParser.parseString(json);
+                return json;
+            } catch (Exception e) {
+                return "INVALID";
             }
-
-            JsonParser.parseString(cleaned);
-
-            return cleaned;
-
-        } catch (Exception e) {
-            System.err.println("JSON Groq non valido: " + response);
-            return "INVALID";
         }
+
+        return "INVALID";
     }
 
     public String generaBase64ConQR(String base64Content, String assertionUrl) {

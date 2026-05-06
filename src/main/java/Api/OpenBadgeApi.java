@@ -39,8 +39,9 @@ public class OpenBadgeApi {
             Map<String, Object> destinatario = (Map<String, Object>) input.get("destinatario");
             Map<String, Object> criteri = (Map<String, Object>) input.get("criteri");
             String base64File = (String) input.get("file");
+            String estensione = (String) input.get("estensione");
 
-            Map<String, Object> result = openBadgeService.genera(badge, mittente, destinatario, criteri, base64File);
+            Map<String, Object> result = openBadgeService.genera(badge, mittente, destinatario, criteri, base64File,estensione);
             infoTrack.setDescrizione("SUCCESSO - 200 - L'openbadge è stato salvato e registrato sulla blockchain.");
             JpaUtil.salvaInfoTrack(infoTrack);
             return Response.ok(result).build();
