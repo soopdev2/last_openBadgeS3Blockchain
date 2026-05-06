@@ -29,6 +29,7 @@ public class ApplicationConfig extends Application {
      */
     private void addRestResourceClasses(Set<Class<?>> resources) {
         resources.add(Api.OpenBadgeApi.class);
+        resources.add(Services.Filter.CorsFilter.class);
         resources.add(Services.Filter.JWTAuthenticationFilter.class);
         resources.add(Services.logic.AuthenticationService.class);
     }
