@@ -314,7 +314,7 @@ public class OpenBadgeService {
                 base64WithQr = utilsHelper.generaBase64ConQR(base64File, assertionUrl);
             }
 
-            response.put("stato", "success");
+            response.put("status", "success");
             response.put("messaggio", "✅ Badge generato con successo.");
 
             response.put("data_rilascio",
@@ -632,7 +632,7 @@ public class OpenBadgeService {
             InfoTrack infoTrack,
             String message) {
 
-        response.put("stato", "errore");
+        response.put("status", "errore");
         response.put("valido", false);
         response.put("messaggio", "❌ " + message);
 
@@ -650,7 +650,7 @@ public class OpenBadgeService {
         JpaUtil.salvaInfoTrack(infoTrack);
 
         Map<String, Object> errorResponse = new LinkedHashMap<>();
-        errorResponse.put("stato", "errore");
+        errorResponse.put("status", "errore");
         errorResponse.put("messaggio", "❌" + context);
         errorResponse.put("dettagli", message);
 

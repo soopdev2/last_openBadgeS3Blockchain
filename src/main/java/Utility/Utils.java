@@ -21,8 +21,6 @@ import java.util.Map;
 import java.util.ResourceBundle;
 import net.sourceforge.tess4j.ITesseract;
 import net.sourceforge.tess4j.Tesseract;
-import org.apache.pdfbox.pdmodel.PDDocument;
-import org.apache.pdfbox.rendering.PDFRenderer;
 
 import com.itextpdf.kernel.pdf.PdfReader;
 import com.itextpdf.kernel.pdf.PdfWriter;
@@ -44,6 +42,9 @@ import java.util.LinkedHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import static org.apache.commons.lang3.exception.ExceptionUtils.getStackTrace;
+import org.apache.pdfbox.Loader;
+import org.apache.pdfbox.pdmodel.PDDocument;
+import org.apache.pdfbox.rendering.PDFRenderer;
 import org.apache.pdfbox.text.PDFTextStripper;
 
 /**
@@ -229,7 +230,7 @@ public class Utils {
             tesseract.setLanguage("ita");
 
             if (extension.equalsIgnoreCase(".pdf")) {
-                try (PDDocument document = PDDocument.load(file)) {
+                try (PDDocument document = Loader.loadPDF(file)) {
                     PDFTextStripper stripper = new PDFTextStripper();
                     String pdfText = stripper.getText(document);
 
