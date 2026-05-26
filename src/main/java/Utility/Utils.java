@@ -19,8 +19,6 @@ import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.ResourceBundle;
-import net.sourceforge.tess4j.ITesseract;
-import net.sourceforge.tess4j.Tesseract;
 
 import com.itextpdf.kernel.pdf.PdfReader;
 import com.itextpdf.kernel.pdf.PdfWriter;
@@ -34,6 +32,7 @@ import com.itextpdf.kernel.pdf.canvas.PdfCanvas;
 import com.itextpdf.kernel.pdf.xobject.PdfFormXObject;
 import com.itextpdf.layout.Canvas;
 import com.itextpdf.layout.element.Image;
+import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -41,17 +40,34 @@ import static java.lang.Math.toRadians;
 import java.util.LinkedHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import javax.imageio.ImageIO;
 import static org.apache.commons.lang3.exception.ExceptionUtils.getStackTrace;
 import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.rendering.PDFRenderer;
 import org.apache.pdfbox.text.PDFTextStripper;
+import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
+import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
+import software.amazon.awssdk.core.SdkBytes;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.textract.TextractClient;
+import software.amazon.awssdk.services.textract.model.Block;
+import software.amazon.awssdk.services.textract.model.BlockType;
+import software.amazon.awssdk.services.textract.model.DetectDocumentTextRequest;
+import software.amazon.awssdk.services.textract.model.DetectDocumentTextResponse;
+import software.amazon.awssdk.services.textract.model.Document;
 
 /**
  *
  * @author Salvatore
  */
 public class Utils {
+
+    private final String ACCESS_KEY = config.getString("access_key");
+    private final String SECRET_KEY = config.getString("secret_key");
+    private final String AWS_REGION = config.getString("aws_region");
+    private final String BUCKET_NAME = config.getString("bucket_name");
+    private final String BASE_URL = "https://" + BUCKET_NAME + ".s3." + AWS_REGION + ".amazonaws.com/";
 
     public static final ResourceBundle config = ResourceBundle.getBundle("conf.config");
 
@@ -193,16 +209,23 @@ public class Utils {
         return s;
     }
 
-    public Map<String, Object> estraiDatiDaFile(String base64File, String estensione) throws Exception {
+    public Map<String, Object> estraiDatiDaFile(
+            String base64File,
+            String estensione
+    ) throws Exception {
+
         File file = null;
 
         try {
+
             String base64Data = base64File;
             String extension = ".tmp";
-
             if (base64File.contains(",")) {
+
                 String[] parts = base64File.split(",");
+
                 String header = parts[0].toLowerCase();
+
                 base64Data = parts[1];
 
                 if (header.contains("pdf")) {
@@ -214,170 +237,340 @@ public class Utils {
                 }
             }
 
-            if (extension.equals(".tmp") && estensione != null && !estensione.isBlank()) {
-                extension = estensione.startsWith(".") ? estensione : "." + estensione;
+            if (extension.equals(".tmp")
+                    && estensione != null
+                    && !estensione.isBlank()) {
+
+                extension = estensione.startsWith(".")
+                        ? estensione
+                        : "." + estensione;
             }
 
             byte[] fileBytes = Base64.getDecoder().decode(base64Data);
+
             file = File.createTempFile("upload_", extension);
+
             Files.write(file.toPath(), fileBytes);
 
             StringBuilder textBuilder = new StringBuilder();
 
-            ITesseract tesseract = new Tesseract();
-            String tesseract_path = config.getString("tesseract_path");
-            tesseract.setDatapath(tesseract_path);
-            tesseract.setLanguage("ita");
+            try (TextractClient textract = TextractClient.builder()
+                    .region(Region.of(AWS_REGION))
+                    .credentialsProvider(
+                            StaticCredentialsProvider.create(
+                                    AwsBasicCredentials.create(
+                                            ACCESS_KEY,
+                                            SECRET_KEY
+                                    )
+                            )
+                    )
+                    .build()) {
 
-            if (extension.equalsIgnoreCase(".pdf")) {
-                try (PDDocument document = Loader.loadPDF(file)) {
-                    PDFTextStripper stripper = new PDFTextStripper();
-                    String pdfText = stripper.getText(document);
+                if (extension.equalsIgnoreCase(".pdf")) {
 
-                    if (pdfText != null && pdfText.trim().length() > 50) {
-                        textBuilder.append(pdfText);
-                    } else {
-                        PDFRenderer renderer = new PDFRenderer(document);
-                        int pages = Math.min(document.getNumberOfPages(), 2);
+                    try (PDDocument document = Loader.loadPDF(file)) {
 
-                        for (int i = 0; i < pages; i++) {
-                            textBuilder.append(
-                                    tesseract.doOCR(renderer.renderImageWithDPI(i, 200))
-                            ).append("\n");
+                        PDFTextStripper stripper = new PDFTextStripper();
+
+                        String pdfText = stripper.getText(document);
+                        if (pdfText != null && pdfText.trim().length() > 50) {
+
+                            textBuilder.append(pdfText);
+
+                        } else {
+
+                            PDFRenderer renderer = new PDFRenderer(document);
+
+                            int pages = Math.min(
+                                    document.getNumberOfPages(),
+                                    2
+                            );
+
+                            for (int i = 0; i < pages; i++) {
+
+                                BufferedImage image
+                                        = renderer.renderImageWithDPI(i, 300);
+
+                                textBuilder.append(
+                                        extractTextWithTextract(
+                                                textract,
+                                                image
+                                        )
+                                ).append("\n");
+                            }
                         }
                     }
+
+                } else {
+                    BufferedImage image = ImageIO.read(file);
+
+                    textBuilder.append(
+                            extractTextWithTextract(
+                                    textract,
+                                    image
+                            )
+                    );
                 }
-            } else {
-                textBuilder.append(tesseract.doOCR(file));
-            }
+                String cleanText = textBuilder.toString()
+                        .replaceAll("\\s+", " ")
+                        .replace("Ã\u00A0", "à")
+                        .trim();
 
-            String cleanText = textBuilder.toString()
-                    .replaceAll("\\s+", " ")
-                    .replace("Ã\u00A0", "à")
-                    .trim();
-
-            if (cleanText.length() > 2500) {
-                cleanText = cleanText.substring(0, 2500);
-            }
-
-            String escapedText = cleanText
-                    .replace("\"", "\\\"")
-                    .replace("\n", " ");
-
-            String prompt = """
-    Rispondi SOLO con JSON valido. Estrai i dati con precisione chirurgica.
-                            
-    ### REGOLE PER IL BADGE:
-    1. badge_name: NON scrivere "Badge". Genera un titolo professionale basato sul contenuto (es. "Certificazione Sviluppatore Java", "Esperto Sicurezza sul Lavoro").
-    2. badge_description: Genera una descrizione dettagliata di cosa rappresenta questo documento e quali competenze valida.
-    
-    ### REGOLE PER USER:
-    1. Estrai Nome, Cognome, Data Nascita, CF, Ruolo, Email (1 sola), Azienda, Telefono.
-    2. Luogo Nascita e Indirizzo vanno in 'altri_dati' come chiavi singole.
-    
-    ### REGOLE PER CRITERI (COMPETENZE):
-   CRITERI: Solo requisiti tecnici/competenze. 'valore' mai vuoto.
-   TROVA E RIPORTA I VALORI CHE DESCRIVONO LA COMPETENZA.
-   SE SPECIFICATO INSERISCI ANCHE LA VALUTAZIONE O SEZIONE.
-                            
-
-    ### SCHEMA JSON:
-    {
-    "badge_name": "",
-     "badge_description": "",
-      "user": { 
-        "nome": "", "cognome": "", "data_nascita": "", "codice_fiscale": "", 
-        "ruolo": "", "email": "", "telefono": "", "azienda": "",
-        "altri_dati": { "luogo_nascita": "", "indirizzo": "" }
-      },
-      "criteriaPoints": [{ "titolo": "", "valore": "" }]
-    }
-    
-    TESTO DA ANALIZZARE: %s
-    """.formatted(escapedText);
-
-            String cleaned = "INVALID";
-
-            for (int i = 0; i < 2; i++) {
-                String raw = GroqUtil.callGroqAPI(prompt);
-                cleaned = cleanGroqJson(raw);
-
-                if (!"INVALID".equals(cleaned)) {
-                    break;
+                if (cleanText.length() > 2500) {
+                    cleanText = cleanText.substring(0, 2500);
                 }
+
+                String escapedText = cleanText
+                        .replace("\"", "\\\"")
+                        .replace("\n", " ");
+
+                String prompt = """
+        Rispondi SOLO con JSON valido. Estrai i dati con precisione chirurgica.
+                                
+        ### REGOLE PER IL BADGE:
+        1. badge_name: NON scrivere "Badge". Genera un titolo professionale basato sul contenuto.
+        2. badge_description: Genera una descrizione dettagliata.
+        
+        ### REGOLE PER USER:
+        1. Estrai Nome, Cognome, Data Nascita, CF, Ruolo, Email, Azienda, Telefono.
+        2. Luogo Nascita e Indirizzo vanno in 'altri_dati'.
+        
+        ### REGOLE PER CRITERI:
+        Solo requisiti tecnici/competenze.
+        
+        ### SCHEMA JSON:
+        {
+          "badge_name": "",
+          "badge_description": "",
+          "user": {
+            "nome": "",
+            "cognome": "",
+            "data_nascita": "",
+            "codice_fiscale": "",
+            "ruolo": "",
+            "email": "",
+            "telefono": "",
+            "azienda": "",
+            "altri_dati": {
+              "luogo_nascita": "",
+              "indirizzo": ""
             }
-
-            if ("INVALID".equals(cleaned)) {
-                return fallbackResponse(cleanText);
+          },
+          "criteriaPoints": [
+            {
+              "titolo": "",
+              "valore": ""
             }
+          ]
+        }
+        
+        TESTO DA ANALIZZARE: %s
+        """.formatted(escapedText);
 
-            JsonObject parsed = JsonParser.parseString(cleaned).getAsJsonObject();
-            JsonObject user = parsed.has("user") ? parsed.getAsJsonObject("user") : new JsonObject();
+                String cleaned = "INVALID";
 
-            Map<String, Object> destinatario = new LinkedHashMap<>();
-            destinatario.put("nome", getSafe(user, "nome"));
-            destinatario.put("cognome", getSafe(user, "cognome"));
-            destinatario.put("email",
-                    getSafe(user, "email").isEmpty() ? extractEmail(cleanText) : getSafe(user, "email")
-            );
-            destinatario.put("telefono", getSafe(user, "telefono"));
-            destinatario.put("dataNascita", getSafe(user, "data_nascita"));
-            destinatario.put("codiceFiscale", getSafe(user, "codice_fiscale"));
-            destinatario.put("ruolo", getSafe(user, "ruolo"));
-            destinatario.put("azienda", getSafe(user, "azienda"));
+                for (int i = 0; i < 2; i++) {
 
-            if (user.has("altri_dati") && user.get("altri_dati").isJsonObject()) {
-                JsonObject extra = user.getAsJsonObject("altri_dati");
+                    String raw = GroqUtil.callGroqAPI(prompt);
 
-                for (Map.Entry<String, JsonElement> entry : extra.entrySet()) {
-                    String key = entry.getKey().replace("_", " ");
-                    destinatario.put(key, entry.getValue().getAsString());
-                }
-            }
+                    cleaned = cleanGroqJson(raw);
 
-            List<Map<String, String>> criteriaList = new ArrayList<>();
-
-            if (parsed.has("criteriaPoints") && parsed.get("criteriaPoints").isJsonArray()) {
-                parsed.getAsJsonArray("criteriaPoints").forEach(el -> {
-                    if (el.isJsonObject()) {
-                        JsonObject obj = el.getAsJsonObject();
-
-                        Map<String, String> item = new LinkedHashMap<>();
-                        item.put("titolo", String.valueOf(getSafe(obj, "titolo")));
-                        item.put("valore", String.valueOf(getSafe(obj, "valore")));
-
-                        criteriaList.add(item);
+                    if (!"INVALID".equals(cleaned)) {
+                        break;
                     }
-                });
+                }
+
+                if ("INVALID".equals(cleaned)) {
+                    return fallbackResponse(cleanText);
+                }
+
+                JsonObject parsed
+                        = JsonParser.parseString(cleaned).getAsJsonObject();
+
+                JsonObject user
+                        = parsed.has("user")
+                        ? parsed.getAsJsonObject("user")
+                        : new JsonObject();
+
+                // --------------------------------------------------
+                // DESTINATARIO
+                // --------------------------------------------------
+                Map<String, Object> destinatario
+                        = new LinkedHashMap<>();
+
+                destinatario.put("nome", getSafe(user, "nome"));
+                destinatario.put("cognome", getSafe(user, "cognome"));
+
+                destinatario.put(
+                        "email",
+                        getSafe(user, "email").isEmpty()
+                        ? extractEmail(cleanText)
+                        : getSafe(user, "email")
+                );
+
+                destinatario.put("telefono", getSafe(user, "telefono"));
+                destinatario.put("dataNascita", getSafe(user, "data_nascita"));
+                destinatario.put("codiceFiscale", getSafe(user, "codice_fiscale"));
+                destinatario.put("ruolo", getSafe(user, "ruolo"));
+                destinatario.put("azienda", getSafe(user, "azienda"));
+
+                if (user.has("altri_dati")
+                        && user.get("altri_dati").isJsonObject()) {
+
+                    JsonObject extra
+                            = user.getAsJsonObject("altri_dati");
+
+                    for (Map.Entry<String, JsonElement> entry
+                            : extra.entrySet()) {
+
+                        String key
+                                = entry.getKey().replace("_", " ");
+
+                        destinatario.put(
+                                key,
+                                entry.getValue().getAsString()
+                        );
+                    }
+                }
+
+                // --------------------------------------------------
+                // CRITERIA
+                // --------------------------------------------------
+                List<Map<String, String>> criteriaList
+                        = new ArrayList<>();
+
+                if (parsed.has("criteriaPoints")
+                        && parsed.get("criteriaPoints").isJsonArray()) {
+
+                    parsed.getAsJsonArray("criteriaPoints")
+                            .forEach(el -> {
+
+                                if (el.isJsonObject()) {
+
+                                    JsonObject obj
+                                            = el.getAsJsonObject();
+
+                                    Map<String, String> item
+                                            = new LinkedHashMap<>();
+
+                                    item.put(
+                                            "titolo",
+                                            getSafe(obj, "titolo")
+                                    );
+
+                                    item.put(
+                                            "valore",
+                                            getSafe(obj, "valore")
+                                    );
+
+                                    criteriaList.add(item);
+                                }
+                            });
+                }
+
+                // --------------------------------------------------
+                // BADGE
+                // --------------------------------------------------
+                String extractedName
+                        = getSafe(parsed, "badge_name");
+
+                String extractedDesc
+                        = getSafe(parsed, "badge_description");
+
+                if (extractedName == null
+                        || extractedName.isBlank()) {
+
+                    extractedName = "Attestato Formazione";
+                }
+
+                if (extractedDesc == null
+                        || extractedDesc.isBlank()) {
+
+                    extractedDesc
+                            = "Documento che certifica competenze professionali.";
+                }
+
+                // --------------------------------------------------
+                // RESPONSE
+                // --------------------------------------------------
+                return Map.of(
+                        "badge",
+                        Map.of(
+                                "badge_name", extractedName,
+                                "badge_description", extractedDesc,
+                                "logo",
+                                "https://openbagetest.s3.eu-central-1.amazonaws.com/logo/logoOpenBadge.png"
+                        ),
+                        "mittente",
+                        Map.of(
+                                "nome", "SmartOOP",
+                                "url", "https://smartoop.it/"
+                        ),
+                        "destinatario", destinatario,
+                        "criteri",
+                        Map.of(
+                                "items", criteriaList
+                        )
+                );
+
+            } finally {
+
+                if (file != null && file.exists()) {
+
+                    Files.deleteIfExists(file.toPath());
+                }
             }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return null;
+    }
 
-            String extractedName = getSafe(parsed, "badge_name");
-            String extractedDesc = getSafe(parsed, "badge_description");
+    /**
+     * OCR TEXTRACT
+     */
+    private String extractTextWithTextract(
+            TextractClient textract,
+            BufferedImage image
+    ) throws Exception {
 
-            if (extractedName == null || extractedName.isBlank()) {
-                extractedName = "Attestato Formazione";
-            }
+        ByteArrayOutputStream baos
+                = new ByteArrayOutputStream();
 
-            if (extractedDesc == null || extractedDesc.isBlank()) {
-                extractedDesc = "Documento che certifica competenze professionali acquisite e validate.";
-            }
+        ImageIO.write(image, "png", baos);
 
-            return Map.of(
-                    "badge", Map.of(
-                            "badge_name", extractedName,
-                            "badge_description", extractedDesc,
-                            "logo", "https://openbagetest.s3.eu-central-1.amazonaws.com/logo/logoOpenBadge.png"
-                    ),
-                    "mittente", Map.of("nome", "SmartOOP", "url", "https://smartoop.it/"),
-                    "destinatario", destinatario,
-                    "criteri", Map.of("items", criteriaList)
-            );
+        byte[] imageBytes = baos.toByteArray();
 
-        } finally {
-            if (file != null && file.exists()) {
-                Files.deleteIfExists(file.toPath());
+        DetectDocumentTextRequest request
+                = DetectDocumentTextRequest.builder()
+                        .document(
+                                Document.builder()
+                                        .bytes(
+                                                SdkBytes.fromByteArray(
+                                                        imageBytes
+                                                )
+                                        )
+                                        .build()
+                        )
+                        .build();
+
+        DetectDocumentTextResponse response
+                = textract.detectDocumentText(request);
+
+        StringBuilder extractedText
+                = new StringBuilder();
+
+        for (Block block : response.blocks()) {
+
+            if (block.blockType() == BlockType.LINE) {
+
+                extractedText
+                        .append(block.text())
+                        .append("\n");
             }
         }
+
+        return extractedText.toString();
     }
 
     private Map<String, Object> fallbackResponse(String text) {
@@ -499,4 +692,5 @@ public class Utils {
             throw new IllegalArgumentException("Valore numerico non valido nella scadenza");
         }
     }
+
 }
